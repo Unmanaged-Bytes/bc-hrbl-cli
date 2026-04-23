@@ -2,6 +2,9 @@
 
 #include "bc_hrbl.h"
 #include "bc_allocators.h"
+#include "bc_allocators_pool.h"
+#include "bc_core.h"
+#include "bc_core_memory.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -37,7 +40,8 @@ static int bc_hrbl_cli_print_usage(FILE* stream)
     return 0;
 }
 
-static bool bc_hrbl_cli_read_file_contents(const char* path, char** out_data, size_t* out_size)
+static bool bc_hrbl_cli_read_file_contents(bc_allocators_context_t* memory_context, const char* path, char** out_data,
+                                           size_t* out_size)
 {
     FILE* stream = fopen(path, "rb");
     if (stream == NULL) {
@@ -57,13 +61,14 @@ static bool bc_hrbl_cli_read_file_contents(const char* path, char** out_data, si
         fclose(stream);
         return false;
     }
-    char* data = (char*)malloc(size == 0u ? 1u : size);
-    if (data == NULL) {
+    void* pointer = NULL;
+    if (!bc_allocators_pool_allocate(memory_context, size == 0u ? 1u : size, &pointer)) {
         fclose(stream);
         return false;
     }
+    char* data = (char*)pointer;
     if (size != 0u && fread(data, 1u, size, stream) != size) {
-        free(data);
+        bc_allocators_pool_free(memory_context, data);
         fclose(stream);
         return false;
     }
@@ -179,7 +184,7 @@ static int bc_hrbl_cli_command_query(int argument_count, char** argument_values)
     }
 
     bc_allocators_context_config_t config;
-    memset(&config, 0, sizeof(config));
+    (void)bc_core_zero(&config, sizeof(config));
     bc_allocators_context_t* memory = NULL;
     if (!bc_allocators_context_create(&config, &memory)) {
         fputs("bc-hrbl query: allocator init failed\n", stderr);
@@ -243,7 +248,7 @@ static int bc_hrbl_cli_command_inspect(int argument_count, char** argument_value
     }
 
     bc_allocators_context_config_t config;
-    memset(&config, 0, sizeof(config));
+    (void)bc_core_zero(&config, sizeof(config));
     bc_allocators_context_t* memory = NULL;
     if (!bc_allocators_context_create(&config, &memory)) {
         fputs("bc-hrbl inspect: allocator init failed\n", stderr);
@@ -332,45 +337,45 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
     }
 
     if (direction == BC_HRBL_CLI_CONVERT_FROM_JSON) {
-        char* json_data = NULL;
-        size_t json_size = 0u;
-        if (!bc_hrbl_cli_read_file_contents(input_path, &json_data, &json_size)) {
-            fprintf(stderr, "bc-hrbl convert: cannot read '%s'\n", input_path);
-            return 1;
-        }
         bc_allocators_context_config_t config;
-        memset(&config, 0, sizeof(config));
+        (void)bc_core_zero(&config, sizeof(config));
         bc_allocators_context_t* memory = NULL;
         if (!bc_allocators_context_create(&config, &memory)) {
-            free(json_data);
             fputs("bc-hrbl convert: allocator init failed\n", stderr);
+            return 1;
+        }
+        char* json_data = NULL;
+        size_t json_size = 0u;
+        if (!bc_hrbl_cli_read_file_contents(memory, input_path, &json_data, &json_size)) {
+            bc_allocators_context_destroy(memory);
+            fprintf(stderr, "bc-hrbl convert: cannot read '%s'\n", input_path);
             return 1;
         }
         void* hrbl_buffer = NULL;
         size_t hrbl_size = 0u;
         bc_hrbl_convert_error_t error;
         if (!bc_hrbl_convert_json_buffer_to_hrbl(memory, json_data, json_size, &hrbl_buffer, &hrbl_size, &error)) {
-            free(json_data);
+            bc_allocators_pool_free(memory, json_data);
             bc_allocators_context_destroy(memory);
             fprintf(stderr, "bc-hrbl convert: %s at line %u column %u\n",
                     error.message != NULL ? error.message : "invalid JSON", error.line, error.column);
             return 1;
         }
-        free(json_data);
+        bc_allocators_pool_free(memory, json_data);
         if (output_path == NULL) {
             if (fwrite(hrbl_buffer, 1u, hrbl_size, stdout) != hrbl_size) {
-                free(hrbl_buffer);
+                bc_hrbl_free_buffer(memory, hrbl_buffer);
                 bc_allocators_context_destroy(memory);
                 fputs("bc-hrbl convert: write failed\n", stderr);
                 return 1;
             }
         } else if (!bc_hrbl_cli_write_file_contents(output_path, hrbl_buffer, hrbl_size)) {
-            free(hrbl_buffer);
+            bc_hrbl_free_buffer(memory, hrbl_buffer);
             bc_allocators_context_destroy(memory);
             fprintf(stderr, "bc-hrbl convert: cannot write '%s'\n", output_path);
             return 1;
         }
-        free(hrbl_buffer);
+        bc_hrbl_free_buffer(memory, hrbl_buffer);
         bc_allocators_context_destroy(memory);
         return 0;
     }
@@ -381,7 +386,7 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
         return 1;
     }
     bc_allocators_context_config_t config;
-    memset(&config, 0, sizeof(config));
+    (void)bc_core_zero(&config, sizeof(config));
     bc_allocators_context_t* memory = NULL;
     if (!bc_allocators_context_create(&config, &memory)) {
         fputs("bc-hrbl convert: allocator init failed\n", stderr);
