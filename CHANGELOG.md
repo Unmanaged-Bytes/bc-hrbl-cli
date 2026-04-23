@@ -10,19 +10,22 @@ the `libbc-hrbl` library (also 1.0.0).
 ### Added
 
 - Subcommand `verify` — integrity check, reports status name on failure.
-- Subcommand `query` — dotted-path lookup on a mmap'd `.hrbl`.
-- Subcommand `inspect` — pretty-JSON dump to stdout.
-- Subcommand `convert` — JSON ↔ `.hrbl` bootstrap (one-way JSON parser
-  provided as an ergonomic entry point; the binary format remains the
-  source of truth).
-- Built on bc-runtime CLI framework (`--help`, `--version`, `--threads`,
-  structured error collector).
+- Subcommand `query` — dotted-path lookup on a mmap'd `.hrbl`, prints
+  scalars as plain text, blocks/arrays as pretty JSON.
+- Subcommand `inspect` — pretty JSON dump to stdout or `-o OUT`.
+- Subcommand `convert` — bootstrap `.hrbl` from JSON and one-way
+  export to JSON / YAML / INI. `--from=json` drives the writer via
+  json-c; `--to=json|yaml|ini` drives the corresponding exporter in
+  libbc-hrbl.
+- `--help` and `--version` banners.
 
 ### Quality
 
-- Full sanitizer coverage (asan / tsan / ubsan / memcheck).
+- Full sanitizer coverage (asan / tsan / ubsan / memcheck) via
+  `bc-sanitize`.
 - cppcheck clean.
-- End-to-end tests exercising the installed binary.
-- Fuzz harness on the JSON → `.hrbl` convert path.
+- End-to-end cmocka tests (`tests/e2e/`) execute the installed binary
+  via `fork+execv` and assert exit codes + stdout contents for the
+  convert-verify-query-inspect pipeline.
 
-[1.0.0]: https://github.com/Unmanaged-Bytes/bc-hrbl/releases/tag/v1.0.0
+[1.0.0]: https://github.com/Unmanaged-Bytes/bc-hrbl-cli/releases/tag/v1.0.0

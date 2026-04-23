@@ -13,10 +13,13 @@
   layout, ordering, UTF-8).
 - `bc-hrbl query <file> <path>` — lookup by dotted path
   (`server.ports[0].value`).
-- `bc-hrbl inspect <file>` — dump to stdout as pretty JSON.
-- `bc-hrbl convert --from=json <in> --to <out>` — bootstrap `.hrbl`
-  from a JSON document.
-- `bc-hrbl convert --to=json <in> --to <out>` — one-way export.
+- `bc-hrbl inspect <file> [-o OUT]` — dump to stdout / file as pretty JSON.
+- `bc-hrbl convert --from=json <in> [-o OUT]` — bootstrap `.hrbl` from
+  a JSON document (via json-c).
+- `bc-hrbl convert --to=json <in> [-o OUT]` — one-way JSON export.
+- `bc-hrbl convert --to=yaml <in> [-o OUT]` — one-way YAML export
+  (via libyaml).
+- `bc-hrbl convert --to=ini <in> [-o OUT]` — one-way INI export.
 
 ## Requirements
 
@@ -26,6 +29,8 @@
 - `libbc-core-dev (>= 1.3.1)`, `libbc-allocators-dev (>= 1.2.0)`,
   `libbc-io-dev (>= 1.1.1)`, `libbc-concurrency-dev (>= 1.1.1)`,
   `libbc-runtime-dev (>= 1.1.2)`
+- `libjson-c-dev (>= 0.15)`, `libyaml-dev (>= 0.2.0)` (transitively
+  pulled through `libbc-hrbl-dev`)
 
 ## Build
 
