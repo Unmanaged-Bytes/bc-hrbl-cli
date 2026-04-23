@@ -13,11 +13,13 @@ Build-Depends: debhelper-compat (= 13),
                libbc-runtime-dev (>= 1.1.2),
                libbc-hrbl-dev (>= 1.0.0),
                libxxhash-dev (>= 0.8.0),
+               libjson-c-dev (>= 0.15),
+               libyaml-dev (>= 0.2.0),
                libcmocka-dev
 Standards-Version: 4.6.2
 Homepage: https://unmanaged-bytes.com/
-Vcs-Git: https://github.com/Unmanaged-Bytes/bc-hrbl.git
-Vcs-Browser: https://github.com/Unmanaged-Bytes/bc-hrbl
+Vcs-Git: https://github.com/Unmanaged-Bytes/bc-hrbl-cli.git
+Vcs-Browser: https://github.com/Unmanaged-Bytes/bc-hrbl-cli
 
 Package: bc-hrbl
 Architecture: amd64
@@ -25,8 +27,10 @@ Depends: ${misc:Depends},
          ${shlibs:Depends}
 Description: Hash-Routed Binary Layout — command-line driver
  CLI driver for the `.hrbl` binary format: verify, query, inspect and
- convert (JSON bootstrap). Built on top of libbc-hrbl which provides
- the zero-copy mmap reader, parallel writer and integrity checker.
+ convert. Built on libbc-hrbl: zero-copy mmap reader, parallel
+ writer, integrity checker. Convert accepts --from=json (bootstrap)
+ and --to={json,yaml,ini} for one-way export.
  .
- The binary format is the source of truth. JSON conversion is one-way
- at read time (pretty dump) and a bootstrap path at write time.
+ The binary format is the source of truth. Text formats are import
+ (JSON via json-c) or one-way export (JSON, YAML via libyaml, INI
+ hand-written).

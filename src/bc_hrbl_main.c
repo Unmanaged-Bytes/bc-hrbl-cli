@@ -28,6 +28,8 @@ static int bc_hrbl_cli_print_usage(FILE* stream)
         "  inspect <file> [-o OUT]              dump as pretty JSON\n"
         "  convert --from=json IN [-o OUT]      bootstrap .hrbl from JSON\n"
         "  convert --to=json IN [-o OUT]        export .hrbl to JSON\n"
+        "  convert --to=yaml IN [-o OUT]        export .hrbl to YAML\n"
+        "  convert --to=ini  IN [-o OUT]        export .hrbl to INI\n"
         "\n"
         "  -h, --help                           show this help and exit\n"
         "  -v, --version                        print version and exit\n",
@@ -276,7 +278,9 @@ static int bc_hrbl_cli_command_inspect(int argument_count, char** argument_value
 typedef enum bc_hrbl_cli_convert_direction {
     BC_HRBL_CLI_CONVERT_NONE = 0,
     BC_HRBL_CLI_CONVERT_FROM_JSON = 1,
-    BC_HRBL_CLI_CONVERT_TO_JSON = 2
+    BC_HRBL_CLI_CONVERT_TO_JSON = 2,
+    BC_HRBL_CLI_CONVERT_TO_YAML = 3,
+    BC_HRBL_CLI_CONVERT_TO_INI = 4
 } bc_hrbl_cli_convert_direction_t;
 
 static int bc_hrbl_cli_command_convert(int argument_count, char** argument_values)
@@ -292,6 +296,14 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
         }
         if (strcmp(arg, "--to=json") == 0) {
             direction = BC_HRBL_CLI_CONVERT_TO_JSON;
+            continue;
+        }
+        if (strcmp(arg, "--to=yaml") == 0) {
+            direction = BC_HRBL_CLI_CONVERT_TO_YAML;
+            continue;
+        }
+        if (strcmp(arg, "--to=ini") == 0) {
+            direction = BC_HRBL_CLI_CONVERT_TO_INI;
             continue;
         }
         if (strcmp(arg, "-o") == 0) {
@@ -311,7 +323,7 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
         return 2;
     }
     if (direction == BC_HRBL_CLI_CONVERT_NONE) {
-        fputs("bc-hrbl convert: specify --from=json or --to=json\n", stderr);
+        fputs("bc-hrbl convert: specify --from=json or --to=json|yaml|ini\n", stderr);
         return 2;
     }
     if (input_path == NULL) {
@@ -388,7 +400,14 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
         fprintf(stderr, "bc-hrbl convert: cannot open output '%s'\n", output_path);
         return 1;
     }
-    bool ok = bc_hrbl_export_json(reader, stream);
+    bool ok = false;
+    if (direction == BC_HRBL_CLI_CONVERT_TO_JSON) {
+        ok = bc_hrbl_export_json(reader, stream);
+    } else if (direction == BC_HRBL_CLI_CONVERT_TO_YAML) {
+        ok = bc_hrbl_export_yaml(reader, stream);
+    } else if (direction == BC_HRBL_CLI_CONVERT_TO_INI) {
+        ok = bc_hrbl_export_ini(reader, stream);
+    }
     if (stream != stdout) {
         fclose(stream);
     }
