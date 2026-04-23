@@ -2,6 +2,20 @@
 
 All notable changes to bc-hrbl (CLI) are documented here.
 
+## [1.1.0]
+
+### Added
+
+- **Quoted path segments** in `bc-hrbl query`. Segments wrapped in `'`
+  or `"` are treated as literal keys, so paths containing `.` or `[`
+  can now be queried. Example:
+  `bc-hrbl query manifest.hrbl "files.'src/main.c'.digest"`.
+  Inherited from libbc-hrbl 1.1.0.
+
+### Dependencies
+
+- Build-Depends `libbc-hrbl-dev (>= 1.1.0)`.
+
 ## [1.0.0]
 
 Initial public release of the `bc-hrbl` command-line driver on top of

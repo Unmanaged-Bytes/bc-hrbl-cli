@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 project('bc-hrbl', 'c',
-  version : '1.0.0',
+  version : '1.1.0',
   license : 'MIT',
   default_options : [
     'c_std=c11',
@@ -53,7 +53,7 @@ bc_allocators_dep  = dependency('bc-allocators',  version : '>= 1.2.0')
 bc_io_dep          = dependency('bc-io',          version : '>= 1.1.1')
 bc_concurrency_dep = dependency('bc-concurrency', version : '>= 1.1.1')
 bc_runtime_dep     = dependency('bc-runtime',     version : '>= 1.1.2')
-bc_hrbl_dep        = dependency('bc-hrbl',        version : '>= 1.0.0')
+bc_hrbl_dep        = dependency('bc-hrbl',        version : '>= 1.1.0')
 
 bc_hrbl_cli_deps = [
   bc_core_dep,
