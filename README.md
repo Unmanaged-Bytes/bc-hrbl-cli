@@ -21,18 +21,9 @@
   (via libyaml).
 - `bc-hrbl convert --to=ini <in> [-o OUT]` — one-way INI export.
 
-## Requirements
-
-- Debian 13 (trixie) or any Linux distro with glibc ≥ 2.38
-- `meson >= 1.0`, `ninja-build`, `pkg-config`
-- `libbc-hrbl-dev (>= 1.0.0)`
-- `libbc-core-dev (>= 1.3.1)`, `libbc-allocators-dev (>= 1.2.0)`,
-  `libbc-io-dev (>= 1.1.1)`, `libbc-concurrency-dev (>= 1.1.1)`,
-  `libbc-runtime-dev (>= 1.1.2)`
-- `libjson-c-dev (>= 0.15)`, `libyaml-dev (>= 0.2.0)` (transitively
-  pulled through `libbc-hrbl-dev`)
-
 ## Build
+
+Requires bc-* sibling libs installed via `bc-install` (rolling).
 
 ```
 meson setup build --buildtype=release
