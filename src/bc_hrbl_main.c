@@ -4,6 +4,8 @@
 #include "bc_allocators.h"
 #include "bc_allocators_pool.h"
 #include "bc_core.h"
+#include "bc_core_cpu.h"
+#include "bc_core_io.h"
 #include "bc_core_memory.h"
 
 #include <errno.h>
@@ -19,29 +21,47 @@
 #define BC_HRBL_CLI_VERSION_STRING "0.0.0-unversioned"
 #endif
 
+/* Wrap an existing FILE* as a bc_core_writer_t over its underlying fd, run the given export, flush, destroy.
+   The caller is expected to fflush(stream) afterwards if it keeps using the FILE* — the bc-core writer holds its own
+   buffer and writes to the fd directly, so libc-level buffering on the FILE* is bypassed. */
+typedef bool (*bc_hrbl_export_function_t)(const bc_hrbl_reader_t*, bc_core_writer_t*);
+
+static bool bc_hrbl_cli_export_via_stream(FILE* stream, const bc_hrbl_reader_t* reader, bc_hrbl_export_function_t export_fn)
+{
+    char writer_buffer[4096] BC_CACHE_LINE_ALIGNED;
+    bc_core_writer_t writer;
+    if (!bc_core_writer_init(&writer, fileno(stream), writer_buffer, sizeof(writer_buffer))) {
+        return false;
+    }
+    bool ok = export_fn(reader, &writer);
+    if (!bc_core_writer_flush(&writer)) {
+        ok = false;
+    }
+    (void)bc_core_writer_destroy(&writer);
+    return ok;
+}
+
 static int bc_hrbl_cli_print_usage(FILE* stream)
 {
-    fputs(
-        "bc-hrbl " BC_HRBL_CLI_VERSION_STRING "\n"
-        "Usage: bc-hrbl <command> [options] [arguments]\n"
-        "\n"
-        "Commands:\n"
-        "  verify <file>                        integrity check a .hrbl file\n"
-        "  query <file> <path>                  lookup a dotted path\n"
-        "  inspect <file> [-o OUT]              dump as pretty JSON\n"
-        "  convert --from=json IN [-o OUT]      bootstrap .hrbl from JSON\n"
-        "  convert --to=json IN [-o OUT]        export .hrbl to JSON\n"
-        "  convert --to=yaml IN [-o OUT]        export .hrbl to YAML\n"
-        "  convert --to=ini  IN [-o OUT]        export .hrbl to INI\n"
-        "\n"
-        "  -h, --help                           show this help and exit\n"
-        "  -v, --version                        print version and exit\n",
-        stream);
+    fputs("bc-hrbl " BC_HRBL_CLI_VERSION_STRING "\n"
+          "Usage: bc-hrbl <command> [options] [arguments]\n"
+          "\n"
+          "Commands:\n"
+          "  verify <file>                        integrity check a .hrbl file\n"
+          "  query <file> <path>                  lookup a dotted path\n"
+          "  inspect <file> [-o OUT]              dump as pretty JSON\n"
+          "  convert --from=json IN [-o OUT]      bootstrap .hrbl from JSON\n"
+          "  convert --to=json IN [-o OUT]        export .hrbl to JSON\n"
+          "  convert --to=yaml IN [-o OUT]        export .hrbl to YAML\n"
+          "  convert --to=ini  IN [-o OUT]        export .hrbl to INI\n"
+          "\n"
+          "  -h, --help                           show this help and exit\n"
+          "  -v, --version                        print version and exit\n",
+          stream);
     return 0;
 }
 
-static bool bc_hrbl_cli_read_file_contents(bc_allocators_context_t* memory_context, const char* path, char** out_data,
-                                           size_t* out_size)
+static bool bc_hrbl_cli_read_file_contents(bc_allocators_context_t* memory_context, const char* path, char** out_data, size_t* out_size)
 {
     FILE* stream = fopen(path, "rb");
     if (stream == NULL) {
@@ -162,7 +182,9 @@ static bool bc_hrbl_cli_print_value(FILE* stream, const bc_hrbl_value_ref_t* val
     }
     case BC_HRBL_KIND_BLOCK:
     case BC_HRBL_KIND_ARRAY:
-        return bc_hrbl_export_json(value->reader, stream);
+        /* Flush libc buffer first so the bc-core writer's direct fd writes appear after any prior fprintf/fputs. */
+        (void)fflush(stream);
+        return bc_hrbl_cli_export_via_stream(stream, value->reader, bc_hrbl_export_json);
     }
     return false;
 }
@@ -267,9 +289,11 @@ static int bc_hrbl_cli_command_inspect(int argument_count, char** argument_value
         fprintf(stderr, "bc-hrbl inspect: cannot open output '%s'\n", output_path);
         return 1;
     }
-    bool ok = bc_hrbl_export_json(reader, stream);
+    bool ok = bc_hrbl_cli_export_via_stream(stream, reader, bc_hrbl_export_json);
     if (stream != stdout) {
         fclose(stream);
+    } else {
+        (void)fflush(stream);
     }
     bc_hrbl_reader_destroy(reader);
     bc_allocators_context_destroy(memory);
@@ -357,8 +381,8 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
         if (!bc_hrbl_convert_json_buffer_to_hrbl(memory, json_data, json_size, &hrbl_buffer, &hrbl_size, &error)) {
             bc_allocators_pool_free(memory, json_data);
             bc_allocators_context_destroy(memory);
-            fprintf(stderr, "bc-hrbl convert: %s at line %u column %u\n",
-                    error.message != NULL ? error.message : "invalid JSON", error.line, error.column);
+            fprintf(stderr, "bc-hrbl convert: %s at line %u column %u\n", error.message != NULL ? error.message : "invalid JSON",
+                    error.line, error.column);
             return 1;
         }
         bc_allocators_pool_free(memory, json_data);
@@ -407,14 +431,16 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
     }
     bool ok = false;
     if (direction == BC_HRBL_CLI_CONVERT_TO_JSON) {
-        ok = bc_hrbl_export_json(reader, stream);
+        ok = bc_hrbl_cli_export_via_stream(stream, reader, bc_hrbl_export_json);
     } else if (direction == BC_HRBL_CLI_CONVERT_TO_YAML) {
-        ok = bc_hrbl_export_yaml(reader, stream);
+        ok = bc_hrbl_cli_export_via_stream(stream, reader, bc_hrbl_export_yaml);
     } else if (direction == BC_HRBL_CLI_CONVERT_TO_INI) {
-        ok = bc_hrbl_export_ini(reader, stream);
+        ok = bc_hrbl_cli_export_via_stream(stream, reader, bc_hrbl_export_ini);
     }
     if (stream != stdout) {
         fclose(stream);
+    } else {
+        (void)fflush(stream);
     }
     bc_hrbl_reader_destroy(reader);
     bc_allocators_context_destroy(memory);
