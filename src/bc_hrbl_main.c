@@ -5,32 +5,115 @@
 #include "bc_allocators_pool.h"
 #include "bc_core.h"
 #include "bc_core_cpu.h"
+#include "bc_core_format.h"
 #include "bc_core_io.h"
 #include "bc_core_memory.h"
 
 #include <errno.h>
-#include <inttypes.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifndef BC_HRBL_CLI_VERSION_STRING
 #define BC_HRBL_CLI_VERSION_STRING "0.0.0-unversioned"
 #endif
 
-/* Wrap an existing FILE* as a bc_core_writer_t over its underlying fd, run the given export, flush, destroy.
-   The caller is expected to fflush(stream) afterwards if it keeps using the FILE* — the bc-core writer holds its own
-   buffer and writes to the fd directly, so libc-level buffering on the FILE* is bypassed. */
 typedef bool (*bc_hrbl_export_function_t)(const bc_hrbl_reader_t*, bc_core_writer_t*);
 
-static bool bc_hrbl_cli_export_via_stream(FILE* stream, const bc_hrbl_reader_t* reader, bc_hrbl_export_function_t export_fn)
+static const char bc_hrbl_cli_usage_text[] = "bc-hrbl " BC_HRBL_CLI_VERSION_STRING "\n"
+                                             "Usage: bc-hrbl <command> [options] [arguments]\n"
+                                             "\n"
+                                             "Commands:\n"
+                                             "  verify <file>                        integrity check a .hrbl file\n"
+                                             "  query <file> <path>                  lookup a dotted path\n"
+                                             "  inspect <file> [-o OUT]              dump as pretty JSON\n"
+                                             "  convert --from=json IN [-o OUT]      bootstrap .hrbl from JSON\n"
+                                             "  convert --to=json IN [-o OUT]        export .hrbl to JSON\n"
+                                             "  convert --to=yaml IN [-o OUT]        export .hrbl to YAML\n"
+                                             "  convert --to=ini  IN [-o OUT]        export .hrbl to INI\n"
+                                             "\n"
+                                             "  -h, --help                           show this help and exit\n"
+                                             "  -v, --version                        print version and exit\n";
+
+static size_t bc_hrbl_cli_cstring_length(const char* value)
+{
+    size_t length = 0;
+    (void)bc_core_length(value, '\0', &length);
+    return length;
+}
+
+static bool bc_hrbl_cli_cstring_equal(const char* left, const char* right)
+{
+    size_t left_length = bc_hrbl_cli_cstring_length(left);
+    size_t right_length = bc_hrbl_cli_cstring_length(right);
+    if (left_length != right_length) {
+        return false;
+    }
+    bool result = false;
+    if (!bc_core_equal(left, right, left_length, &result)) {
+        return false;
+    }
+    return result;
+}
+
+static void bc_hrbl_cli_emit_writer_message(int fd, const char* part1, const char* part2, const char* part3, const char* part4,
+                                            const char* part5)
+{
+    char buffer[1024];
+    bc_core_writer_t writer;
+    if (!bc_core_writer_init(&writer, fd, buffer, sizeof(buffer))) {
+        return;
+    }
+    if (part1 != NULL) {
+        (void)bc_core_writer_write_cstring(&writer, part1);
+    }
+    if (part2 != NULL) {
+        (void)bc_core_writer_write_cstring(&writer, part2);
+    }
+    if (part3 != NULL) {
+        (void)bc_core_writer_write_cstring(&writer, part3);
+    }
+    if (part4 != NULL) {
+        (void)bc_core_writer_write_cstring(&writer, part4);
+    }
+    if (part5 != NULL) {
+        (void)bc_core_writer_write_cstring(&writer, part5);
+    }
+    (void)bc_core_writer_flush(&writer);
+    (void)bc_core_writer_destroy(&writer);
+}
+
+static void bc_hrbl_cli_emit_stderr(const char* part1, const char* part2, const char* part3, const char* part4, const char* part5)
+{
+    bc_hrbl_cli_emit_writer_message(STDERR_FILENO, part1, part2, part3, part4, part5);
+}
+
+static void bc_hrbl_cli_emit_stdout(const char* part1, const char* part2, const char* part3)
+{
+    bc_hrbl_cli_emit_writer_message(STDOUT_FILENO, part1, part2, part3, NULL, NULL);
+}
+
+static int bc_hrbl_cli_print_usage_to_fd(int fd)
+{
+    char buffer[2048];
+    bc_core_writer_t writer;
+    if (!bc_core_writer_init(&writer, fd, buffer, sizeof(buffer))) {
+        return 0;
+    }
+    (void)bc_core_writer_write_cstring(&writer, bc_hrbl_cli_usage_text);
+    (void)bc_core_writer_flush(&writer);
+    (void)bc_core_writer_destroy(&writer);
+    return 0;
+}
+
+static bool bc_hrbl_cli_export_via_fd(int fd, const bc_hrbl_reader_t* reader, bc_hrbl_export_function_t export_fn)
 {
     char writer_buffer[4096] BC_CACHE_LINE_ALIGNED;
     bc_core_writer_t writer;
-    if (!bc_core_writer_init(&writer, fileno(stream), writer_buffer, sizeof(writer_buffer))) {
+    if (!bc_core_writer_init(&writer, fd, writer_buffer, sizeof(writer_buffer))) {
         return false;
     }
     bool ok = export_fn(reader, &writer);
@@ -41,58 +124,45 @@ static bool bc_hrbl_cli_export_via_stream(FILE* stream, const bc_hrbl_reader_t* 
     return ok;
 }
 
-static int bc_hrbl_cli_print_usage(FILE* stream)
-{
-    fputs("bc-hrbl " BC_HRBL_CLI_VERSION_STRING "\n"
-          "Usage: bc-hrbl <command> [options] [arguments]\n"
-          "\n"
-          "Commands:\n"
-          "  verify <file>                        integrity check a .hrbl file\n"
-          "  query <file> <path>                  lookup a dotted path\n"
-          "  inspect <file> [-o OUT]              dump as pretty JSON\n"
-          "  convert --from=json IN [-o OUT]      bootstrap .hrbl from JSON\n"
-          "  convert --to=json IN [-o OUT]        export .hrbl to JSON\n"
-          "  convert --to=yaml IN [-o OUT]        export .hrbl to YAML\n"
-          "  convert --to=ini  IN [-o OUT]        export .hrbl to INI\n"
-          "\n"
-          "  -h, --help                           show this help and exit\n"
-          "  -v, --version                        print version and exit\n",
-          stream);
-    return 0;
-}
-
 static bool bc_hrbl_cli_read_file_contents(bc_allocators_context_t* memory_context, const char* path, char** out_data, size_t* out_size)
 {
-    FILE* stream = fopen(path, "rb");
-    if (stream == NULL) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
         return false;
     }
-    if (fseek(stream, 0, SEEK_END) != 0) {
-        fclose(stream);
+    struct stat stat_info;
+    if (fstat(fd, &stat_info) != 0) {
+        (void)close(fd);
         return false;
     }
-    long size_signed = ftell(stream);
-    if (size_signed < 0) {
-        fclose(stream);
+    if (stat_info.st_size < 0) {
+        (void)close(fd);
         return false;
     }
-    size_t size = (size_t)size_signed;
-    if (fseek(stream, 0, SEEK_SET) != 0) {
-        fclose(stream);
-        return false;
-    }
+    size_t size = (size_t)stat_info.st_size;
     void* pointer = NULL;
     if (!bc_allocators_pool_allocate(memory_context, size == 0u ? 1u : size, &pointer)) {
-        fclose(stream);
+        (void)close(fd);
         return false;
     }
     char* data = (char*)pointer;
-    if (size != 0u && fread(data, 1u, size, stream) != size) {
-        bc_allocators_pool_free(memory_context, data);
-        fclose(stream);
-        return false;
+    if (size != 0u) {
+        char reader_buffer[4096];
+        bc_core_reader_t reader;
+        if (!bc_core_reader_init(&reader, fd, reader_buffer, sizeof(reader_buffer))) {
+            bc_allocators_pool_free(memory_context, data);
+            (void)close(fd);
+            return false;
+        }
+        if (!bc_core_reader_read_exact(&reader, data, size)) {
+            (void)bc_core_reader_destroy(&reader);
+            bc_allocators_pool_free(memory_context, data);
+            (void)close(fd);
+            return false;
+        }
+        (void)bc_core_reader_destroy(&reader);
     }
-    fclose(stream);
+    (void)close(fd);
     *out_data = data;
     *out_size = size;
     return true;
@@ -100,35 +170,67 @@ static bool bc_hrbl_cli_read_file_contents(bc_allocators_context_t* memory_conte
 
 static bool bc_hrbl_cli_write_file_contents(const char* path, const void* data, size_t size)
 {
-    FILE* stream = fopen(path, "wb");
-    if (stream == NULL) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
         return false;
     }
-    if (size != 0u && fwrite(data, 1u, size, stream) != size) {
-        fclose(stream);
+    bool ok = true;
+    if (size != 0u) {
+        char writer_buffer[4096];
+        bc_core_writer_t writer;
+        if (!bc_core_writer_init(&writer, fd, writer_buffer, sizeof(writer_buffer))) {
+            (void)close(fd);
+            return false;
+        }
+        if (!bc_core_writer_write_bytes(&writer, data, size)) {
+            ok = false;
+        }
+        if (!bc_core_writer_flush(&writer)) {
+            ok = false;
+        }
+        (void)bc_core_writer_destroy(&writer);
+    }
+    if (close(fd) != 0) {
+        ok = false;
+    }
+    return ok;
+}
+
+static bool bc_hrbl_cli_write_buffer_to_fd(int fd, const void* data, size_t size)
+{
+    char writer_buffer[4096];
+    bc_core_writer_t writer;
+    if (!bc_core_writer_init(&writer, fd, writer_buffer, sizeof(writer_buffer))) {
         return false;
     }
-    fclose(stream);
-    return true;
+    bool ok = true;
+    if (size != 0u && !bc_core_writer_write_bytes(&writer, data, size)) {
+        ok = false;
+    }
+    if (!bc_core_writer_flush(&writer)) {
+        ok = false;
+    }
+    (void)bc_core_writer_destroy(&writer);
+    return ok;
 }
 
 static int bc_hrbl_cli_command_verify(int argument_count, char** argument_values)
 {
     if (argument_count != 3) {
-        fputs("bc-hrbl verify: expected exactly one file argument\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl verify: expected exactly one file argument\n", NULL, NULL, NULL, NULL);
         return 2;
     }
     const char* path = argument_values[2];
     bc_hrbl_verify_status_t status = bc_hrbl_verify_file(path);
     if (status == BC_HRBL_VERIFY_OK) {
-        fprintf(stdout, "ok %s\n", path);
+        bc_hrbl_cli_emit_stdout("ok ", path, "\n");
         return 0;
     }
-    fprintf(stderr, "bc-hrbl verify: %s: %s\n", path, bc_hrbl_verify_status_name(status));
+    bc_hrbl_cli_emit_stderr("bc-hrbl verify: ", path, ": ", bc_hrbl_verify_status_name(status), "\n");
     return 1;
 }
 
-static bool bc_hrbl_cli_print_value(FILE* stream, const bc_hrbl_value_ref_t* value)
+static bool bc_hrbl_cli_print_value_to_fd(int fd, const bc_hrbl_value_ref_t* value)
 {
     bc_hrbl_kind_t kind;
     if (!bc_hrbl_reader_value_kind(value, &kind)) {
@@ -136,37 +238,61 @@ static bool bc_hrbl_cli_print_value(FILE* stream, const bc_hrbl_value_ref_t* val
     }
     switch (kind) {
     case BC_HRBL_KIND_NULL:
-        fputs("null\n", stream);
+        bc_hrbl_cli_emit_writer_message(fd, "null\n", NULL, NULL, NULL, NULL);
         return true;
     case BC_HRBL_KIND_FALSE:
-        fputs("false\n", stream);
+        bc_hrbl_cli_emit_writer_message(fd, "false\n", NULL, NULL, NULL, NULL);
         return true;
     case BC_HRBL_KIND_TRUE:
-        fputs("true\n", stream);
+        bc_hrbl_cli_emit_writer_message(fd, "true\n", NULL, NULL, NULL, NULL);
         return true;
     case BC_HRBL_KIND_INT64: {
         int64_t v = 0;
         if (!bc_hrbl_reader_get_int64(value, &v)) {
             return false;
         }
-        fprintf(stream, "%" PRId64 "\n", v);
-        return true;
+        char buffer[64];
+        bc_core_writer_t writer;
+        if (!bc_core_writer_init(&writer, fd, buffer, sizeof(buffer))) {
+            return false;
+        }
+        bool ok = bc_core_writer_write_signed_integer_64(&writer, v);
+        ok = ok && bc_core_writer_write_char(&writer, '\n');
+        ok = ok && bc_core_writer_flush(&writer);
+        (void)bc_core_writer_destroy(&writer);
+        return ok;
     }
     case BC_HRBL_KIND_UINT64: {
         uint64_t v = 0u;
         if (!bc_hrbl_reader_get_uint64(value, &v)) {
             return false;
         }
-        fprintf(stream, "%" PRIu64 "\n", v);
-        return true;
+        char buffer[64];
+        bc_core_writer_t writer;
+        if (!bc_core_writer_init(&writer, fd, buffer, sizeof(buffer))) {
+            return false;
+        }
+        bool ok = bc_core_writer_write_unsigned_integer_64_decimal(&writer, v);
+        ok = ok && bc_core_writer_write_char(&writer, '\n');
+        ok = ok && bc_core_writer_flush(&writer);
+        (void)bc_core_writer_destroy(&writer);
+        return ok;
     }
     case BC_HRBL_KIND_FLOAT64: {
         double v = 0.0;
         if (!bc_hrbl_reader_get_float64(value, &v)) {
             return false;
         }
-        fprintf(stream, "%.17g\n", v);
-        return true;
+        char buffer[64];
+        bc_core_writer_t writer;
+        if (!bc_core_writer_init(&writer, fd, buffer, sizeof(buffer))) {
+            return false;
+        }
+        bool ok = bc_core_writer_write_double_shortest_round_trip(&writer, v);
+        ok = ok && bc_core_writer_write_char(&writer, '\n');
+        ok = ok && bc_core_writer_flush(&writer);
+        (void)bc_core_writer_destroy(&writer);
+        return ok;
     }
     case BC_HRBL_KIND_STRING: {
         const char* data = NULL;
@@ -174,17 +300,23 @@ static bool bc_hrbl_cli_print_value(FILE* stream, const bc_hrbl_value_ref_t* val
         if (!bc_hrbl_reader_get_string(value, &data, &length)) {
             return false;
         }
-        if (length != 0u && fwrite(data, 1u, length, stream) != length) {
+        char buffer[4096];
+        bc_core_writer_t writer;
+        if (!bc_core_writer_init(&writer, fd, buffer, sizeof(buffer))) {
             return false;
         }
-        fputc('\n', stream);
-        return true;
+        bool ok = true;
+        if (length != 0u) {
+            ok = bc_core_writer_write_bytes(&writer, data, length);
+        }
+        ok = ok && bc_core_writer_write_char(&writer, '\n');
+        ok = ok && bc_core_writer_flush(&writer);
+        (void)bc_core_writer_destroy(&writer);
+        return ok;
     }
     case BC_HRBL_KIND_BLOCK:
     case BC_HRBL_KIND_ARRAY:
-        /* Flush libc buffer first so the bc-core writer's direct fd writes appear after any prior fprintf/fputs. */
-        (void)fflush(stream);
-        return bc_hrbl_cli_export_via_stream(stream, value->reader, bc_hrbl_export_json);
+        return bc_hrbl_cli_export_via_fd(fd, value->reader, bc_hrbl_export_json);
     }
     return false;
 }
@@ -192,16 +324,16 @@ static bool bc_hrbl_cli_print_value(FILE* stream, const bc_hrbl_value_ref_t* val
 static int bc_hrbl_cli_command_query(int argument_count, char** argument_values)
 {
     if (argument_count != 4) {
-        fputs("bc-hrbl query: expected <file> <path> arguments\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl query: expected <file> <path> arguments\n", NULL, NULL, NULL, NULL);
         return 2;
     }
     const char* path = argument_values[2];
     const char* dotted = argument_values[3];
-    size_t dotted_length = strlen(dotted);
+    size_t dotted_length = bc_hrbl_cli_cstring_length(dotted);
 
     bc_hrbl_verify_status_t status = bc_hrbl_verify_file(path);
     if (status != BC_HRBL_VERIFY_OK) {
-        fprintf(stderr, "bc-hrbl query: %s: %s\n", path, bc_hrbl_verify_status_name(status));
+        bc_hrbl_cli_emit_stderr("bc-hrbl query: ", path, ": ", bc_hrbl_verify_status_name(status), "\n");
         return 1;
     }
 
@@ -209,26 +341,26 @@ static int bc_hrbl_cli_command_query(int argument_count, char** argument_values)
     (void)bc_core_zero(&config, sizeof(config));
     bc_allocators_context_t* memory = NULL;
     if (!bc_allocators_context_create(&config, &memory)) {
-        fputs("bc-hrbl query: allocator init failed\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl query: allocator init failed\n", NULL, NULL, NULL, NULL);
         return 1;
     }
     bc_hrbl_reader_t* reader = NULL;
     if (!bc_hrbl_reader_open(memory, path, &reader)) {
         bc_allocators_context_destroy(memory);
-        fprintf(stderr, "bc-hrbl query: cannot open '%s'\n", path);
+        bc_hrbl_cli_emit_stderr("bc-hrbl query: cannot open '", path, "'\n", NULL, NULL);
         return 1;
     }
     bc_hrbl_value_ref_t value;
     if (!bc_hrbl_reader_find(reader, dotted, dotted_length, &value)) {
         bc_hrbl_reader_destroy(reader);
         bc_allocators_context_destroy(memory);
-        fprintf(stderr, "bc-hrbl query: path not found: %s\n", dotted);
+        bc_hrbl_cli_emit_stderr("bc-hrbl query: path not found: ", dotted, "\n", NULL, NULL);
         return 1;
     }
-    if (!bc_hrbl_cli_print_value(stdout, &value)) {
+    if (!bc_hrbl_cli_print_value_to_fd(STDOUT_FILENO, &value)) {
         bc_hrbl_reader_destroy(reader);
         bc_allocators_context_destroy(memory);
-        fputs("bc-hrbl query: cannot render value\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl query: cannot render value\n", NULL, NULL, NULL, NULL);
         return 1;
     }
     bc_hrbl_reader_destroy(reader);
@@ -242,9 +374,9 @@ static int bc_hrbl_cli_command_inspect(int argument_count, char** argument_value
     const char* output_path = NULL;
     for (int i = 2; i < argument_count; i += 1) {
         const char* arg = argument_values[i];
-        if (strcmp(arg, "-o") == 0) {
+        if (bc_hrbl_cli_cstring_equal(arg, "-o")) {
             if (i + 1 >= argument_count) {
-                fputs("bc-hrbl inspect: -o requires a path\n", stderr);
+                bc_hrbl_cli_emit_stderr("bc-hrbl inspect: -o requires a path\n", NULL, NULL, NULL, NULL);
                 return 2;
             }
             output_path = argument_values[i + 1];
@@ -255,17 +387,17 @@ static int bc_hrbl_cli_command_inspect(int argument_count, char** argument_value
             path = arg;
             continue;
         }
-        fprintf(stderr, "bc-hrbl inspect: unexpected argument '%s'\n", arg);
+        bc_hrbl_cli_emit_stderr("bc-hrbl inspect: unexpected argument '", arg, "'\n", NULL, NULL);
         return 2;
     }
     if (path == NULL) {
-        fputs("bc-hrbl inspect: missing input file\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl inspect: missing input file\n", NULL, NULL, NULL, NULL);
         return 2;
     }
 
     bc_hrbl_verify_status_t status = bc_hrbl_verify_file(path);
     if (status != BC_HRBL_VERIFY_OK) {
-        fprintf(stderr, "bc-hrbl inspect: %s: %s\n", path, bc_hrbl_verify_status_name(status));
+        bc_hrbl_cli_emit_stderr("bc-hrbl inspect: ", path, ": ", bc_hrbl_verify_status_name(status), "\n");
         return 1;
     }
 
@@ -273,32 +405,38 @@ static int bc_hrbl_cli_command_inspect(int argument_count, char** argument_value
     (void)bc_core_zero(&config, sizeof(config));
     bc_allocators_context_t* memory = NULL;
     if (!bc_allocators_context_create(&config, &memory)) {
-        fputs("bc-hrbl inspect: allocator init failed\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl inspect: allocator init failed\n", NULL, NULL, NULL, NULL);
         return 1;
     }
     bc_hrbl_reader_t* reader = NULL;
     if (!bc_hrbl_reader_open(memory, path, &reader)) {
         bc_allocators_context_destroy(memory);
-        fprintf(stderr, "bc-hrbl inspect: cannot open '%s'\n", path);
+        bc_hrbl_cli_emit_stderr("bc-hrbl inspect: cannot open '", path, "'\n", NULL, NULL);
         return 1;
     }
-    FILE* stream = output_path != NULL ? fopen(output_path, "wb") : stdout;
-    if (stream == NULL) {
-        bc_hrbl_reader_destroy(reader);
-        bc_allocators_context_destroy(memory);
-        fprintf(stderr, "bc-hrbl inspect: cannot open output '%s'\n", output_path);
-        return 1;
+
+    int output_fd = STDOUT_FILENO;
+    bool owns_output_fd = false;
+    if (output_path != NULL) {
+        output_fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (output_fd < 0) {
+            bc_hrbl_reader_destroy(reader);
+            bc_allocators_context_destroy(memory);
+            bc_hrbl_cli_emit_stderr("bc-hrbl inspect: cannot open output '", output_path, "'\n", NULL, NULL);
+            return 1;
+        }
+        owns_output_fd = true;
     }
-    bool ok = bc_hrbl_cli_export_via_stream(stream, reader, bc_hrbl_export_json);
-    if (stream != stdout) {
-        fclose(stream);
-    } else {
-        (void)fflush(stream);
+    bool ok = bc_hrbl_cli_export_via_fd(output_fd, reader, bc_hrbl_export_json);
+    if (owns_output_fd) {
+        if (close(output_fd) != 0) {
+            ok = false;
+        }
     }
     bc_hrbl_reader_destroy(reader);
     bc_allocators_context_destroy(memory);
     if (!ok) {
-        fputs("bc-hrbl inspect: export failed\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl inspect: export failed\n", NULL, NULL, NULL, NULL);
         return 1;
     }
     return 0;
@@ -319,25 +457,25 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
     const char* output_path = NULL;
     for (int i = 2; i < argument_count; i += 1) {
         const char* arg = argument_values[i];
-        if (strcmp(arg, "--from=json") == 0) {
+        if (bc_hrbl_cli_cstring_equal(arg, "--from=json")) {
             direction = BC_HRBL_CLI_CONVERT_FROM_JSON;
             continue;
         }
-        if (strcmp(arg, "--to=json") == 0) {
+        if (bc_hrbl_cli_cstring_equal(arg, "--to=json")) {
             direction = BC_HRBL_CLI_CONVERT_TO_JSON;
             continue;
         }
-        if (strcmp(arg, "--to=yaml") == 0) {
+        if (bc_hrbl_cli_cstring_equal(arg, "--to=yaml")) {
             direction = BC_HRBL_CLI_CONVERT_TO_YAML;
             continue;
         }
-        if (strcmp(arg, "--to=ini") == 0) {
+        if (bc_hrbl_cli_cstring_equal(arg, "--to=ini")) {
             direction = BC_HRBL_CLI_CONVERT_TO_INI;
             continue;
         }
-        if (strcmp(arg, "-o") == 0) {
+        if (bc_hrbl_cli_cstring_equal(arg, "-o")) {
             if (i + 1 >= argument_count) {
-                fputs("bc-hrbl convert: -o requires a path\n", stderr);
+                bc_hrbl_cli_emit_stderr("bc-hrbl convert: -o requires a path\n", NULL, NULL, NULL, NULL);
                 return 2;
             }
             output_path = argument_values[i + 1];
@@ -348,15 +486,15 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
             input_path = arg;
             continue;
         }
-        fprintf(stderr, "bc-hrbl convert: unexpected argument '%s'\n", arg);
+        bc_hrbl_cli_emit_stderr("bc-hrbl convert: unexpected argument '", arg, "'\n", NULL, NULL);
         return 2;
     }
     if (direction == BC_HRBL_CLI_CONVERT_NONE) {
-        fputs("bc-hrbl convert: specify --from=json or --to=json|yaml|ini\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl convert: specify --from=json or --to=json|yaml|ini\n", NULL, NULL, NULL, NULL);
         return 2;
     }
     if (input_path == NULL) {
-        fputs("bc-hrbl convert: missing input file\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl convert: missing input file\n", NULL, NULL, NULL, NULL);
         return 2;
     }
 
@@ -365,14 +503,14 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
         (void)bc_core_zero(&config, sizeof(config));
         bc_allocators_context_t* memory = NULL;
         if (!bc_allocators_context_create(&config, &memory)) {
-            fputs("bc-hrbl convert: allocator init failed\n", stderr);
+            bc_hrbl_cli_emit_stderr("bc-hrbl convert: allocator init failed\n", NULL, NULL, NULL, NULL);
             return 1;
         }
         char* json_data = NULL;
         size_t json_size = 0u;
         if (!bc_hrbl_cli_read_file_contents(memory, input_path, &json_data, &json_size)) {
             bc_allocators_context_destroy(memory);
-            fprintf(stderr, "bc-hrbl convert: cannot read '%s'\n", input_path);
+            bc_hrbl_cli_emit_stderr("bc-hrbl convert: cannot read '", input_path, "'\n", NULL, NULL);
             return 1;
         }
         void* hrbl_buffer = NULL;
@@ -381,22 +519,42 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
         if (!bc_hrbl_convert_json_buffer_to_hrbl(memory, json_data, json_size, &hrbl_buffer, &hrbl_size, &error)) {
             bc_allocators_pool_free(memory, json_data);
             bc_allocators_context_destroy(memory);
-            fprintf(stderr, "bc-hrbl convert: %s at line %u column %u\n", error.message != NULL ? error.message : "invalid JSON",
-                    error.line, error.column);
+            char line_buffer[24];
+            char column_buffer[24];
+            size_t line_length = 0;
+            size_t column_length = 0;
+            (void)bc_core_format_unsigned_integer_64_decimal(line_buffer, sizeof(line_buffer), error.line, &line_length);
+            (void)bc_core_format_unsigned_integer_64_decimal(column_buffer, sizeof(column_buffer), error.column, &column_length);
+            line_buffer[line_length] = '\0';
+            column_buffer[column_length] = '\0';
+            const char* message = error.message != NULL ? error.message : "invalid JSON";
+            char buffer[1024];
+            bc_core_writer_t writer;
+            if (bc_core_writer_init_standard_error(&writer, buffer, sizeof(buffer))) {
+                (void)bc_core_writer_write_cstring(&writer, "bc-hrbl convert: ");
+                (void)bc_core_writer_write_cstring(&writer, message);
+                (void)bc_core_writer_write_cstring(&writer, " at line ");
+                (void)bc_core_writer_write_cstring(&writer, line_buffer);
+                (void)bc_core_writer_write_cstring(&writer, " column ");
+                (void)bc_core_writer_write_cstring(&writer, column_buffer);
+                (void)bc_core_writer_write_char(&writer, '\n');
+                (void)bc_core_writer_flush(&writer);
+                (void)bc_core_writer_destroy(&writer);
+            }
             return 1;
         }
         bc_allocators_pool_free(memory, json_data);
         if (output_path == NULL) {
-            if (fwrite(hrbl_buffer, 1u, hrbl_size, stdout) != hrbl_size) {
+            if (!bc_hrbl_cli_write_buffer_to_fd(STDOUT_FILENO, hrbl_buffer, hrbl_size)) {
                 bc_hrbl_free_buffer(memory, hrbl_buffer);
                 bc_allocators_context_destroy(memory);
-                fputs("bc-hrbl convert: write failed\n", stderr);
+                bc_hrbl_cli_emit_stderr("bc-hrbl convert: write failed\n", NULL, NULL, NULL, NULL);
                 return 1;
             }
         } else if (!bc_hrbl_cli_write_file_contents(output_path, hrbl_buffer, hrbl_size)) {
             bc_hrbl_free_buffer(memory, hrbl_buffer);
             bc_allocators_context_destroy(memory);
-            fprintf(stderr, "bc-hrbl convert: cannot write '%s'\n", output_path);
+            bc_hrbl_cli_emit_stderr("bc-hrbl convert: cannot write '", output_path, "'\n", NULL, NULL);
             return 1;
         }
         bc_hrbl_free_buffer(memory, hrbl_buffer);
@@ -406,46 +564,51 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
 
     bc_hrbl_verify_status_t status = bc_hrbl_verify_file(input_path);
     if (status != BC_HRBL_VERIFY_OK) {
-        fprintf(stderr, "bc-hrbl convert: %s: %s\n", input_path, bc_hrbl_verify_status_name(status));
+        bc_hrbl_cli_emit_stderr("bc-hrbl convert: ", input_path, ": ", bc_hrbl_verify_status_name(status), "\n");
         return 1;
     }
     bc_allocators_context_config_t config;
     (void)bc_core_zero(&config, sizeof(config));
     bc_allocators_context_t* memory = NULL;
     if (!bc_allocators_context_create(&config, &memory)) {
-        fputs("bc-hrbl convert: allocator init failed\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl convert: allocator init failed\n", NULL, NULL, NULL, NULL);
         return 1;
     }
     bc_hrbl_reader_t* reader = NULL;
     if (!bc_hrbl_reader_open(memory, input_path, &reader)) {
         bc_allocators_context_destroy(memory);
-        fprintf(stderr, "bc-hrbl convert: cannot open '%s'\n", input_path);
+        bc_hrbl_cli_emit_stderr("bc-hrbl convert: cannot open '", input_path, "'\n", NULL, NULL);
         return 1;
     }
-    FILE* stream = output_path != NULL ? fopen(output_path, "wb") : stdout;
-    if (stream == NULL) {
-        bc_hrbl_reader_destroy(reader);
-        bc_allocators_context_destroy(memory);
-        fprintf(stderr, "bc-hrbl convert: cannot open output '%s'\n", output_path);
-        return 1;
+    int output_fd = STDOUT_FILENO;
+    bool owns_output_fd = false;
+    if (output_path != NULL) {
+        output_fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (output_fd < 0) {
+            bc_hrbl_reader_destroy(reader);
+            bc_allocators_context_destroy(memory);
+            bc_hrbl_cli_emit_stderr("bc-hrbl convert: cannot open output '", output_path, "'\n", NULL, NULL);
+            return 1;
+        }
+        owns_output_fd = true;
     }
     bool ok = false;
     if (direction == BC_HRBL_CLI_CONVERT_TO_JSON) {
-        ok = bc_hrbl_cli_export_via_stream(stream, reader, bc_hrbl_export_json);
+        ok = bc_hrbl_cli_export_via_fd(output_fd, reader, bc_hrbl_export_json);
     } else if (direction == BC_HRBL_CLI_CONVERT_TO_YAML) {
-        ok = bc_hrbl_cli_export_via_stream(stream, reader, bc_hrbl_export_yaml);
+        ok = bc_hrbl_cli_export_via_fd(output_fd, reader, bc_hrbl_export_yaml);
     } else if (direction == BC_HRBL_CLI_CONVERT_TO_INI) {
-        ok = bc_hrbl_cli_export_via_stream(stream, reader, bc_hrbl_export_ini);
+        ok = bc_hrbl_cli_export_via_fd(output_fd, reader, bc_hrbl_export_ini);
     }
-    if (stream != stdout) {
-        fclose(stream);
-    } else {
-        (void)fflush(stream);
+    if (owns_output_fd) {
+        if (close(output_fd) != 0) {
+            ok = false;
+        }
     }
     bc_hrbl_reader_destroy(reader);
     bc_allocators_context_destroy(memory);
     if (!ok) {
-        fputs("bc-hrbl convert: export failed\n", stderr);
+        bc_hrbl_cli_emit_stderr("bc-hrbl convert: export failed\n", NULL, NULL, NULL, NULL);
         return 1;
     }
     return 0;
@@ -454,30 +617,30 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
 int main(int argument_count, char** argument_values)
 {
     if (argument_count < 2) {
-        bc_hrbl_cli_print_usage(stderr);
+        bc_hrbl_cli_print_usage_to_fd(STDERR_FILENO);
         return 2;
     }
     const char* command = argument_values[1];
-    if (strcmp(command, "-h") == 0 || strcmp(command, "--help") == 0) {
-        return bc_hrbl_cli_print_usage(stdout);
+    if (bc_hrbl_cli_cstring_equal(command, "-h") || bc_hrbl_cli_cstring_equal(command, "--help")) {
+        return bc_hrbl_cli_print_usage_to_fd(STDOUT_FILENO);
     }
-    if (strcmp(command, "-v") == 0 || strcmp(command, "--version") == 0) {
-        fputs("bc-hrbl " BC_HRBL_CLI_VERSION_STRING "\n", stdout);
+    if (bc_hrbl_cli_cstring_equal(command, "-v") || bc_hrbl_cli_cstring_equal(command, "--version")) {
+        bc_hrbl_cli_emit_stdout("bc-hrbl " BC_HRBL_CLI_VERSION_STRING "\n", NULL, NULL);
         return 0;
     }
-    if (strcmp(command, "verify") == 0) {
+    if (bc_hrbl_cli_cstring_equal(command, "verify")) {
         return bc_hrbl_cli_command_verify(argument_count, argument_values);
     }
-    if (strcmp(command, "query") == 0) {
+    if (bc_hrbl_cli_cstring_equal(command, "query")) {
         return bc_hrbl_cli_command_query(argument_count, argument_values);
     }
-    if (strcmp(command, "inspect") == 0) {
+    if (bc_hrbl_cli_cstring_equal(command, "inspect")) {
         return bc_hrbl_cli_command_inspect(argument_count, argument_values);
     }
-    if (strcmp(command, "convert") == 0) {
+    if (bc_hrbl_cli_cstring_equal(command, "convert")) {
         return bc_hrbl_cli_command_convert(argument_count, argument_values);
     }
-    fprintf(stderr, "bc-hrbl: unknown command '%s'\n", command);
-    bc_hrbl_cli_print_usage(stderr);
+    bc_hrbl_cli_emit_stderr("bc-hrbl: unknown command '", command, "'\n", NULL, NULL);
+    bc_hrbl_cli_print_usage_to_fd(STDERR_FILENO);
     return 2;
 }
