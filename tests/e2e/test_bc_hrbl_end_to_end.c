@@ -19,8 +19,8 @@
 #endif
 
 typedef struct command_result {
-    int    exit_code;
-    char*  stdout_buffer;
+    int exit_code;
+    char* stdout_buffer;
     size_t stdout_length;
 } command_result_t;
 

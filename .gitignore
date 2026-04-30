@@ -14,3 +14,5 @@ debian/bc-hrbl/
 fuzzing/crashes/
 fuzzing/corpus/*/*
 !fuzzing/corpus/*/seed_*
+
+reports/
