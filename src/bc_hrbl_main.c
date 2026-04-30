@@ -352,18 +352,18 @@ static int bc_hrbl_cli_command_query(int argument_count, char** argument_values)
     }
     bc_hrbl_value_ref_t value;
     if (!bc_hrbl_reader_find(reader, dotted, dotted_length, &value)) {
-        bc_hrbl_reader_destroy(reader);
+        bc_hrbl_reader_close(reader);
         bc_allocators_context_destroy(memory);
         bc_hrbl_cli_emit_stderr("bc-hrbl query: path not found: ", dotted, "\n", NULL, NULL);
         return 1;
     }
     if (!bc_hrbl_cli_print_value_to_fd(STDOUT_FILENO, &value)) {
-        bc_hrbl_reader_destroy(reader);
+        bc_hrbl_reader_close(reader);
         bc_allocators_context_destroy(memory);
         bc_hrbl_cli_emit_stderr("bc-hrbl query: cannot render value\n", NULL, NULL, NULL, NULL);
         return 1;
     }
-    bc_hrbl_reader_destroy(reader);
+    bc_hrbl_reader_close(reader);
     bc_allocators_context_destroy(memory);
     return 0;
 }
@@ -420,7 +420,7 @@ static int bc_hrbl_cli_command_inspect(int argument_count, char** argument_value
     if (output_path != NULL) {
         output_fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
         if (output_fd < 0) {
-            bc_hrbl_reader_destroy(reader);
+            bc_hrbl_reader_close(reader);
             bc_allocators_context_destroy(memory);
             bc_hrbl_cli_emit_stderr("bc-hrbl inspect: cannot open output '", output_path, "'\n", NULL, NULL);
             return 1;
@@ -433,7 +433,7 @@ static int bc_hrbl_cli_command_inspect(int argument_count, char** argument_value
             ok = false;
         }
     }
-    bc_hrbl_reader_destroy(reader);
+    bc_hrbl_reader_close(reader);
     bc_allocators_context_destroy(memory);
     if (!ok) {
         bc_hrbl_cli_emit_stderr("bc-hrbl inspect: export failed\n", NULL, NULL, NULL, NULL);
@@ -546,18 +546,18 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
         bc_allocators_pool_free(memory, json_data);
         if (output_path == NULL) {
             if (!bc_hrbl_cli_write_buffer_to_fd(STDOUT_FILENO, hrbl_buffer, hrbl_size)) {
-                bc_hrbl_free_buffer(memory, hrbl_buffer);
+                bc_hrbl_writer_free_buffer(memory, hrbl_buffer);
                 bc_allocators_context_destroy(memory);
                 bc_hrbl_cli_emit_stderr("bc-hrbl convert: write failed\n", NULL, NULL, NULL, NULL);
                 return 1;
             }
         } else if (!bc_hrbl_cli_write_file_contents(output_path, hrbl_buffer, hrbl_size)) {
-            bc_hrbl_free_buffer(memory, hrbl_buffer);
+            bc_hrbl_writer_free_buffer(memory, hrbl_buffer);
             bc_allocators_context_destroy(memory);
             bc_hrbl_cli_emit_stderr("bc-hrbl convert: cannot write '", output_path, "'\n", NULL, NULL);
             return 1;
         }
-        bc_hrbl_free_buffer(memory, hrbl_buffer);
+        bc_hrbl_writer_free_buffer(memory, hrbl_buffer);
         bc_allocators_context_destroy(memory);
         return 0;
     }
@@ -585,7 +585,7 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
     if (output_path != NULL) {
         output_fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
         if (output_fd < 0) {
-            bc_hrbl_reader_destroy(reader);
+            bc_hrbl_reader_close(reader);
             bc_allocators_context_destroy(memory);
             bc_hrbl_cli_emit_stderr("bc-hrbl convert: cannot open output '", output_path, "'\n", NULL, NULL);
             return 1;
@@ -605,7 +605,7 @@ static int bc_hrbl_cli_command_convert(int argument_count, char** argument_value
             ok = false;
         }
     }
-    bc_hrbl_reader_destroy(reader);
+    bc_hrbl_reader_close(reader);
     bc_allocators_context_destroy(memory);
     if (!ok) {
         bc_hrbl_cli_emit_stderr("bc-hrbl convert: export failed\n", NULL, NULL, NULL, NULL);
